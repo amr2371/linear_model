@@ -1,0 +1,216 @@
+---
+title: "Cross Validation"
+output: github_document
+---
+
+```{r setup, include=FALSE}
+library(tidyverse)
+library(mgcv)
+library(modelr)
+
+library(viridis)
+
+knitr::opts_chunk$set(
+	echo = TRUE,
+	warning = FALSE,
+	fig.width = 8, 
+  fig.height = 6,
+  out.width = "90%"
+)
+
+options(
+  ggplot2.continuous.colour = "viridis",
+  ggplot2.continuous.fill = "viridis"
+)
+
+scale_colour_discrete = scale_colour_viridis_d
+scale_fill_discrete = scale_fill_viridis_d
+
+theme_set(theme_minimal() + theme(legend.position = "bottom"))
+```
+
+
+## Step one 
+
+Cross validation "by hand" on simulated data.
+
+```{r}
+set.seed(1)
+
+nonlin_df = 
+  tibble(
+    id = 1:100,
+    x = runif(100, 0, 1),
+    y = 1 - 10 * (x - .3) ^ 2 + rnorm(100, 0, .3)
+  )
+
+nonlin_df %>% 
+  ggplot(aes(x = x, y = y)) + 
+  geom_point()
+```
+
+Let's get this by hand.
+
+```{r}
+train_df = sample_n(nonlin_df, 80)
+test_df = anti_join(nonlin_df, train_df, by = "id")
+```
+
+
+```{r}
+train_df %>% 
+  ggplot(aes(x = x, y = y)) + 
+  geom_point() + 
+  geom_point(data = test_df, color = "red")
+```
+
+
+Let's try to fit three models. 
+
+```{r}
+linear_mod = lm(y ~ x, data = train_df)
+smooth_mod = mgcv::gam(y ~ s(x), data = train_df)
+wiggly_mod = mgcv::gam(y ~ s(x, k = 30), sp = 10e-6, data = train_df)
+```
+
+
+Let's see the results. 
+
+```{r}
+train_df %>% 
+  add_predictions(smooth_mod) %>% 
+  ggplot(aes(x = x, y = y)) + 
+  geom_point() + 
+  geom_point(data = test_df, color = "red") + 
+  geom_line(aes(y = pred), color = "red")
+```
+
+
+Let's make predictions and compute RMSEs. 
+
+```{r}
+rmse(linear_mod, test_df)
+rmse(smooth_mod, test_df)
+rmse(wiggly_mod, test_df)
+```
+
+## Can we iterate ..?
+
+```{r}
+cv_df = 
+  crossv_mc(nonlin_df, 100) %>% 
+  mutate(
+    train = map(train, as_tibble),
+    test = map(test, as_tibble),
+  ) %>% 
+  mutate(
+    linear_fits = map(.x = train, ~lm(y ~ x, data = .x)),
+    smooth_fits = map(.x = train, ~mgcv::gam(y ~ s(x), data = .x)),
+    wiggly_fits = map(.x = train, ~mgcv::gam(y ~ s(x, k = 30), sp = 10e-6, data = .x))
+  ) %>% 
+  mutate(
+    rmse_linear = map2_dbl(.x = linear_fits, .y = test, ~rmse(model = .x, data = .y)),
+    rmse_smooth = map2_dbl(.x = smooth_fits, .y = test, ~rmse(model = .x, data = .y)),
+    rmse_wiggly = map2_dbl(.x = wiggly_fits, .y = test, ~rmse(model = .x, data = .y)),
+  )
+```
+
+Make a box plot ...
+
+```{r}
+cv_df %>% 
+  select(starts_with("rmse")) %>% 
+  pivot_longer(
+    everything(),
+    names_to = "model",
+    values_to = "rmse",
+    names_prefix = "rmse_"
+  ) %>% 
+  ggplot(aes(x = model, y = rmse)) +
+  geom_boxplot()
+```
+
+## Try it on a real dataset
+
+
+```{r}
+growth_df = read_csv("data/nepalese_children.csv")
+```
+
+
+```{r}
+growth_df %>% 
+  ggplot(aes(x = weight, y = armc)) + 
+  geom_point(alpha = .3)
+```
+
+Brief aside on piecewise linear models.
+
+```{r}
+growth_df = 
+  growth_df %>% 
+  mutate(
+    weight_pwl = (weight > 7) * (weight - 7)
+  )
+```
+
+
+```{r}
+linear_model = lm(armc ~ weight, data = growth_df)
+pwl_model = lm(armc ~ weight + weight_pwl, data = growth_df)
+smooth_model = mgcv::gam(armc ~ s(weight), data = growth_df)
+
+```
+
+
+
+```{r}
+growth_df %>% 
+  add_predictions(smooth_model) %>% 
+  ggplot(aes(x = weight, y = armc)) + 
+  geom_point(alpha = .3) + 
+  geom_line(aes(y = pred), color = "red")
+```
+
+```{r}
+cv_df = 
+  crossv_mc(growth_df, 100) %>% 
+  mutate(
+    train = map(train, as_tibble),
+    test = map(test, as_tibble),
+  )
+  
+
+cv_df = 
+  cv_df %>% 
+  mutate(
+    linear_fits = map(.x = train, ~lm(armc ~ weight, data = .x)),
+    pwl_fits =    map(.x = train, ~lm(armc ~ weight + weight_pwl, data = .x)),
+    smooth_fits = map(.x = train, ~mgcv::gam(armc ~ s(weight), data = .x))
+  ) %>% 
+  mutate(
+    rmse_linear = map2_dbl(.x = linear_fits, .y = test, ~rmse(model = .x, data = .y)),
+    rmse_pwl =    map2_dbl(.x = pwl_fits,    .y = test, ~rmse(model = .x, data = .y)),
+    rmse_smooth = map2_dbl(.x = smooth_fits, .y = test, ~rmse(model = .x, data = .y))
+  )
+```
+
+
+Let's look at the results
+
+```{r}
+cv_df %>% 
+  select(starts_with("rmse")) %>% 
+  pivot_longer(
+    everything(),
+    names_to = "model",
+    values_to = "rmse",
+    names_prefix = "rmse_"
+  ) %>% 
+  ggplot(aes(x = model, y = rmse)) +
+  geom_boxplot()
+```
+
+
+
+
